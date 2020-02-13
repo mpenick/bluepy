@@ -4,6 +4,8 @@ from __future__ import print_function
 
 """Bluetooth Low Energy Python interface"""
 import sys
+import errno
+import fcntl
 import os
 import time
 import subprocess
@@ -282,8 +284,11 @@ class BluepyHelper:
                                             stderr=self._stderr,
                                             universal_newlines=True,
                                             preexec_fn = preexec_function)
+            self._wakeup = os.pipe() # (r, w)
+            fcntl.fcntl(self._wakeup[0], fcntl.F_SETFL, os.O_NONBLOCK) # Make the read side non-blocking
             self._poller = select.poll()
             self._poller.register(self._helper.stdout, select.POLLIN)
+            self._poller.register(self._wakeup[0], select.POLLIN)
 
     def _stopHelper(self):
         if self._helper is not None:
@@ -343,6 +348,21 @@ class BluepyHelper:
                 if len(fds) == 0:
                     DBG("Select timeout")
                     return None
+                for fd in fds:
+                    if (self._wakeup[0], select.POLLIN) == fd:
+                        DBG("Select wakeup")
+                        while True:
+                            try:
+                                buf = os.read(fd[0], 1024)
+                                if len(buf) == 1024: # Possibly more to read
+                                    continue
+                                return None
+                            except OSError as e:
+                                if e.errno == errno.EAGAIN or e.errno == errno.EWOULDBLOCK:
+                                    return None
+                                if e.errno == errno.EINTR:
+                                    continue
+                                raise e
 
             rv = self._helper.stdout.readline()
             DBG("Got:", repr(rv))
@@ -373,6 +393,9 @@ class BluepyHelper:
                 continue
             else:
                 raise BTLEInternalError("Unexpected response (%s)" % respType, resp)
+
+    def wakeup(self):
+        os.write(self._wakeup[1], bytes([0x00]))
 
     def status(self):
         self._writeCmd("stat\n")
